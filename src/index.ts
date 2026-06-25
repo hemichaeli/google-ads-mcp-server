@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import http from "http";
+import { randomUUID } from "crypto";
 
 const API_VERSION = "v20";
 const BASE_URL = `https://googleads.googleapis.com/${API_VERSION}`;
@@ -468,21 +470,32 @@ function createMcpServer(): McpServer {
   return server;
 }
 
-// ── HTTP SERVER ───────────────────────────────────────────────────────────────
+// ── HTTP SERVER (dual transport: SSE legacy + Streamable HTTP) ─────────────────
 
 const PORT = parseInt(process.env.PORT || "3000");
 const BASE = process.env.SERVER_URL || `http://localhost:${PORT}`;
 
-// Session map: sessionId -> transport (required for /messages routing)
-const sessions: Record<string, SSEServerTransport> = {};
+// Legacy SSE sessions: sessionId -> SSEServerTransport
+const sseSessions: Record<string, SSEServerTransport> = {};
+// Streamable HTTP sessions: sessionId -> StreamableHTTPServerTransport
+const httpSessions: Record<string, StreamableHTTPServerTransport> = {};
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => resolve(body));
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://localhost:${PORT}`);
 
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-Id");
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   // Health
@@ -492,31 +505,81 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // SSE connection
+  // ── STREAMABLE HTTP transport (modern, Claude.ai uses this) ──────────────────
+  // Claude.ai POSTs JSON-RPC to /mcp or /sse with Accept: application/json, text/event-stream
+  if ((url.pathname === "/mcp" || url.pathname === "/sse") && (req.method === "POST" || req.method === "DELETE")) {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport: StreamableHTTPServerTransport | undefined = sessionId ? httpSessions[sessionId] : undefined;
+
+    if (req.method === "POST") {
+      const raw = await readBody(req);
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { res.writeHead(400); res.end("Invalid JSON"); return; }
+
+      const isInit = Array.isArray(parsed)
+        ? parsed.some((m: { method?: string }) => m?.method === "initialize")
+        : (parsed as { method?: string })?.method === "initialize";
+
+      if (!transport && isInit) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid: string) => { httpSessions[sid] = transport!; },
+        });
+        transport.onclose = () => { if (transport!.sessionId) delete httpSessions[transport!.sessionId]; };
+        const mcpServer = createMcpServer();
+        await mcpServer.connect(transport);
+        await transport.handleRequest(req, res, parsed);
+        return;
+      }
+
+      if (!transport) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "No valid session. Send initialize first." }, id: null }));
+        return;
+      }
+      await transport.handleRequest(req, res, parsed);
+      return;
+    }
+
+    // DELETE - close session
+    if (req.method === "DELETE") {
+      if (transport) { await transport.handleRequest(req, res); }
+      else { res.writeHead(404); res.end("No session"); }
+      return;
+    }
+  }
+
+  // ── STREAMABLE HTTP: GET on /mcp opens an SSE stream for server->client ───────
+  if (req.method === "GET" && url.pathname === "/mcp") {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const transport = sessionId ? httpSessions[sessionId] : undefined;
+    if (!transport) { res.writeHead(400); res.end("No session"); return; }
+    await transport.handleRequest(req, res);
+    return;
+  }
+
+  // ── LEGACY SSE transport (GET /sse opens stream) ─────────────────────────────
   if (req.method === "GET" && url.pathname === "/sse") {
     const mcpServer = createMcpServer();
     const transport = new SSEServerTransport("/messages", res);
-    sessions[transport.sessionId] = transport;
-    res.on("close", () => { delete sessions[transport.sessionId]; });
+    sseSessions[transport.sessionId] = transport;
+    res.on("close", () => { delete sseSessions[transport.sessionId]; });
     await mcpServer.connect(transport);
     return;
   }
 
-  // Messages (client -> server)
+  // Legacy SSE messages (client -> server)
   if (req.method === "POST" && url.pathname === "/messages") {
-    const sessionId = url.searchParams.get("sessionId") || req.headers["mcp-session-id"] as string;
-    const transport = sessions[sessionId];
+    const sessionId = (url.searchParams.get("sessionId") || req.headers["mcp-session-id"]) as string;
+    const transport = sseSessions[sessionId];
     if (!transport) { res.writeHead(404); res.end("Session not found"); return; }
-    let body = "";
-    req.on("data", c => { body += c; });
-    req.on("end", async () => {
-      try { await transport.handlePostMessage(req, res, JSON.parse(body)); }
-      catch (e) { res.writeHead(500); res.end(String(e)); }
-    });
+    const raw = await readBody(req);
+    try { await transport.handlePostMessage(req, res, JSON.parse(raw)); }
+    catch (e) { res.writeHead(500); res.end(String(e)); }
     return;
   }
 
-  // OAuth 2.1 discovery
+  // ── OAuth 2.1 discovery (auto-approve) ───────────────────────────────────────
   if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ resource: BASE, authorization_servers: [BASE] }));
@@ -524,12 +587,15 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ issuer: BASE, authorization_endpoint: `${BASE}/authorize`, token_endpoint: `${BASE}/token`, registration_endpoint: `${BASE}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], token_endpoint_auth_methods_supported: ["none"] }));
+    res.end(JSON.stringify({ issuer: BASE, authorization_endpoint: `${BASE}/authorize`, token_endpoint: `${BASE}/token`, registration_endpoint: `${BASE}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] }));
     return;
   }
   if (url.pathname === "/register") {
+    const raw = await readBody(req);
+    let reg: { redirect_uris?: string[] } = {};
+    try { reg = JSON.parse(raw); } catch { /* ignore */ }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ client_id: "google-ads-mcp", client_secret: "mcp-secret", redirect_uris: [] }));
+    res.end(JSON.stringify({ client_id: "google-ads-mcp", client_secret: "mcp-secret", redirect_uris: reg.redirect_uris || [], token_endpoint_auth_method: "none" }));
     return;
   }
   if (url.pathname === "/authorize") {
@@ -549,4 +615,4 @@ const server = http.createServer(async (req, res) => {
   res.end("Not found");
 });
 
-server.listen(PORT, () => console.error(`Google Ads MCP Server on port ${PORT}`));
+server.listen(PORT, () => console.error(`Google Ads MCP Server (dual transport) on port ${PORT}`));
