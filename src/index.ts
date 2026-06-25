@@ -579,40 +579,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── OAuth 2.1 discovery (auto-approve) ───────────────────────────────────────
-  if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ resource: BASE, authorization_servers: [BASE] }));
-    return;
-  }
-  if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ issuer: BASE, authorization_endpoint: `${BASE}/authorize`, token_endpoint: `${BASE}/token`, registration_endpoint: `${BASE}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] }));
-    return;
-  }
-  if (url.pathname === "/register") {
-    const raw = await readBody(req);
-    let reg: { redirect_uris?: string[] } = {};
-    try { reg = JSON.parse(raw); } catch { /* ignore */ }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ client_id: "google-ads-mcp", client_secret: "mcp-secret", redirect_uris: reg.redirect_uris || [], token_endpoint_auth_method: "none" }));
-    return;
-  }
-  if (url.pathname === "/authorize") {
-    const ru = url.searchParams.get("redirect_uri") || "";
-    const st = url.searchParams.get("state") || "";
-    res.writeHead(302, { Location: `${ru}?code=auto_approved&state=${st}` });
-    res.end();
-    return;
-  }
-  if (url.pathname === "/token") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ access_token: "mcp-token", token_type: "bearer", expires_in: 86400 }));
-    return;
-  }
+  // No OAuth: this server is unauthenticated. Returning 404 on /.well-known/*
+  // signals to MCP clients (Claude.ai) to connect WITHOUT an auth flow.
 
   res.writeHead(404);
   res.end("Not found");
 });
-
 server.listen(PORT, () => console.error(`Google Ads MCP Server (dual transport) on port ${PORT}`));
