@@ -5,7 +5,7 @@ import { z } from "zod";
 import http from "http";
 import { randomUUID } from "crypto";
 
-const API_VERSION = "v20";
+const API_VERSION = "v21";
 const BASE_URL = `https://googleads.googleapis.com/${API_VERSION}`;
 const TOKEN_URL = "https://www.googleapis.com/oauth2/v3/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
