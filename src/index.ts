@@ -23,6 +23,15 @@ function getAccounts(): Record<string, { refresh_token: string; customer_id: str
 
 const tokenCache: Record<string, { access_token: string; expires_at: number }> = {};
 
+// Pending OAuth results: state -> result (auto-cleaned after 10 minutes)
+const pendingOAuthResults: Record<string, { refresh_token?: string; access_token?: string; error?: string; timestamp: number }> = {};
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const state of Object.keys(pendingOAuthResults)) {
+    if (pendingOAuthResults[state].timestamp < cutoff) delete pendingOAuthResults[state];
+  }
+}, 60_000).unref();
+
 async function getAccessToken(email: string): Promise<string> {
   const cached = tokenCache[email];
   if (cached && Date.now() < cached.expires_at - 60000) return cached.access_token;
@@ -446,21 +455,59 @@ function createMcpServer(): McpServer {
 
   server.registerTool("ads_get_oauth_url", {
     title: "Get OAuth Authorization URL",
-    description: "Generate the Google OAuth2 URL to authorize a Google Ads account. Visit the URL, sign in with the account's email, approve, and copy the code shown. Then call ads_exchange_code.",
-    inputSchema: { redirect_uri: z.string().default("urn:ietf:wg:oauth:2.0:oob") },
+    description: "Generate a Google OAuth2 URL to authorize a new Google Ads account. The server captures the token automatically via its /oauth/callback endpoint — no copy-pasting required. After the user approves in the browser, call ads_poll_oauth_result with the returned state to get the refresh_token.",
+    inputSchema: {
+      state: z.string().optional().describe("Optional tracking ID for this request. Auto-generated if omitted."),
+      authuser: z.string().optional().describe("Hint which Google account to use (0=first signed-in account, 1=second, etc.)"),
+    },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ redirect_uri }) => {
-    const url = `${AUTH_URL}?${new URLSearchParams({ client_id: CLIENT_ID, redirect_uri, response_type: "code", scope: SCOPE, access_type: "offline", prompt: "consent" }).toString()}`;
-    return { content: [{ type: "text", text: `Visit this URL in a browser (signed in with the target account):\n\n${url}\n\nAfter approving, copy the code and call ads_exchange_code with it.` }] };
+  }, async ({ state, authuser }) => {
+    const stateParam = state || randomUUID();
+    const redirect_uri = `${BASE}/oauth/callback`;
+    const params: Record<string, string> = {
+      client_id: CLIENT_ID,
+      redirect_uri,
+      response_type: "code",
+      scope: SCOPE,
+      access_type: "offline",
+      prompt: "consent",
+      state: stateParam,
+    };
+    if (authuser !== undefined) params.authuser = authuser;
+    const url = `${AUTH_URL}?${new URLSearchParams(params).toString()}`;
+    return { content: [{ type: "text", text: `Visit this URL in a browser (signed in with the target Google Ads account):\n\n${url}\n\nAfter approving, the server will capture the token automatically.\nThen call ads_poll_oauth_result with:\n  state = "${stateParam}"` }] };
+  });
+
+  server.registerTool("ads_poll_oauth_result", {
+    title: "Poll OAuth Result",
+    description: "Check if an OAuth authorization flow completed. Call after the user has visited the URL from ads_get_oauth_url and approved access. Returns the refresh_token on success.",
+    inputSchema: { state: z.string().describe("The state value returned by ads_get_oauth_url") },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ state }) => {
+    const result = pendingOAuthResults[state];
+    if (!result) {
+      return { content: [{ type: "text", text: "No result yet. Please visit the OAuth URL and approve access first, then try again." }] };
+    }
+    if (result.error) {
+      return { content: [{ type: "text", text: `OAuth failed: ${result.error}` }] };
+    }
+    if (!result.refresh_token) {
+      return { content: [{ type: "text", text: "Authorization pending. Please complete the OAuth flow in your browser." }] };
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ message: "✅ Authorization successful! Give me the email + customer_id and I will update Railway.", refresh_token: result.refresh_token, access_token_preview: (result.access_token || "").slice(0, 20) + "..." }, null, 2) }] };
   });
 
   server.registerTool("ads_exchange_code", {
     title: "Exchange OAuth Code for Refresh Token",
-    description: "Exchange the authorization code from ads_get_oauth_url for a refresh token. Provide the refresh_token and customer_id to me so I can update GOOGLE_ADS_ACCOUNTS in Railway.",
-    inputSchema: { code: z.string(), redirect_uri: z.string().default("urn:ietf:wg:oauth:2.0:oob") },
+    description: "Manually exchange an authorization code for a refresh token. Only needed if you are NOT using the automatic /oauth/callback flow. Provide the refresh_token and customer_id so I can update GOOGLE_ADS_ACCOUNTS in Railway.",
+    inputSchema: {
+      code: z.string(),
+      redirect_uri: z.string().optional().describe("OAuth redirect URI used when generating the auth URL. Defaults to the server callback URL."),
+    },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async ({ code, redirect_uri }) => {
-    const params = new URLSearchParams({ grant_type: "authorization_code", client_id: CLIENT_ID, client_secret: CLIENT_SECRET, code, redirect_uri });
+    const finalRedirectUri = redirect_uri || `${BASE}/oauth/callback`;
+    const params = new URLSearchParams({ grant_type: "authorization_code", client_id: CLIENT_ID, client_secret: CLIENT_SECRET, code, redirect_uri: finalRedirectUri });
     const res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params.toString() });
     if (!res.ok) throw new Error(`Token exchange failed: ${await res.text()}`);
     const data = await res.json() as { access_token: string; refresh_token: string; token_type: string };
@@ -502,6 +549,49 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: "1.0.0", accounts: Object.keys(getAccounts()).length }));
+    return;
+  }
+
+  // ── OAuth callback: auto-capture code and exchange for tokens ─────────────
+  if (req.method === "GET" && url.pathname === "/oauth/callback") {
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const error = url.searchParams.get("error");
+
+    if (error || !code) {
+      const msg = error || "No authorization code received";
+      if (state) pendingOAuthResults[state] = { error: msg, timestamp: Date.now() };
+      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:600px;margin:auto"><h1>❌ Authorization Failed</h1><p>${msg}</p><p>You can close this tab and return to Claude.</p></body></html>`);
+      return;
+    }
+
+    const redirectUri = `${BASE}/oauth/callback`;
+    const params = new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      code,
+      redirect_uri: redirectUri,
+    });
+
+    try {
+      const tokenRes = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      });
+      if (!tokenRes.ok) throw new Error(await tokenRes.text());
+      const data = await tokenRes.json() as { access_token: string; refresh_token: string };
+      if (!data.refresh_token) throw new Error("No refresh_token returned. Ensure access_type=offline and prompt=consent were set.");
+      if (state) pendingOAuthResults[state] = { refresh_token: data.refresh_token, access_token: data.access_token, timestamp: Date.now() };
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:600px;margin:auto"><h1>✅ Authorization Successful!</h1><p>Your Google Ads account has been authorized. You can close this tab and return to Claude.</p><p style="font-size:0.85em;color:#666;margin-top:2rem">State: <code>${state}</code></p></body></html>`);
+    } catch (e) {
+      if (state) pendingOAuthResults[state] = { error: String(e), timestamp: Date.now() };
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:600px;margin:auto"><h1>❌ Token Exchange Failed</h1><p>${String(e)}</p><p>You can close this tab and check with Claude.</p></body></html>`);
+    }
     return;
   }
 
