@@ -201,7 +201,7 @@ const pct = (v: unknown) => ((Number(v) || 0) * 100).toFixed(2) + "%";
 const lcid = (email: string, override?: string) => override || getAccounts()[email]?.login_customer_id;
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "google-ads-mcp-server", version: "1.0.0" });
+  const server = new McpServer({ name: "google-ads-mcp-server", version: "1.0.1" });
 
   // ── ACCOUNTS ──────────────────────────────────────────────────────────────
 
@@ -824,7 +824,7 @@ const server = http.createServer(async (req, res) => {
   // Health
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: "1.0.0", accounts: Object.keys(getAccounts()).length }));
+    res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: "1.0.1", accounts: Object.keys(getAccounts()).length }));
     return;
   }
 
