@@ -201,7 +201,7 @@ const pct = (v: unknown) => ((Number(v) || 0) * 100).toFixed(2) + "%";
 const lcid = (email: string, override?: string) => override || getAccounts()[email]?.login_customer_id;
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "google-ads-mcp-server", version: "1.0.1" });
+  const server = new McpServer({ name: "google-ads-mcp-server", version: "1.0.2" });
 
   // ── ACCOUNTS ──────────────────────────────────────────────────────────────
 
@@ -461,6 +461,34 @@ function createMcpServer(): McpServer {
   }, async ({ email, customer_id, ad_group_id, ad_id, login_customer_id }) => {
     const cid = customer_id.replace(/-/g, "");
     const r = await apiPost(email, `customers/${cid}/adGroupAds:mutate`, { operations: [{ remove: `customers/${cid}/adGroupAds/${ad_group_id}~${ad_id}` }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_create_rsa", {
+    title: "Create Responsive Search Ad (RSA)",
+    description: "Create a Responsive Search Ad (RSA) in an ad group. RSA automatically tests different headline and description combinations.",
+    inputSchema: {
+      email: z.string(),
+      customer_id: z.string(),
+      ad_group_id: z.string(),
+      headlines: z.array(z.string()).min(3).max(15).describe("Headline texts (3-15 headlines for best results)"),
+      descriptions: z.array(z.string()).min(2).max(4).describe("Description texts (2-4 descriptions)"),
+      final_urls: z.array(z.string()).min(1).describe("Landing page URLs"),
+      status: z.enum(["ENABLED", "PAUSED"]).default("ENABLED"),
+      login_customer_id: z.string().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async ({ email, customer_id, ad_group_id, headlines, descriptions, final_urls, status, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const adSpec = {
+      finalUrls: final_urls,
+      status,
+      responsiveSearchAd: {
+        headlines: headlines.map(h => ({ text: h })),
+        descriptions: descriptions.map(d => ({ text: d }))
+      }
+    };
+    const r = await apiPost(email, `customers/${cid}/adGroupAds:mutate`, { operations: [{ create: { adGroup: `customers/${cid}/adGroups/${ad_group_id}`, ad: adSpec } }] }, lcid(email, login_customer_id));
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
@@ -824,7 +852,7 @@ const server = http.createServer(async (req, res) => {
   // Health
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: "1.0.1", accounts: Object.keys(getAccounts()).length }));
+    res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: "1.0.2", accounts: Object.keys(getAccounts()).length }));
     return;
   }
 
