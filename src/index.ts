@@ -332,6 +332,28 @@ function createMcpServer(): McpServer {
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
+  server.registerTool("ads_delete_campaign", {
+    title: "Delete Campaign",
+    description: "Delete a campaign.",
+    inputSchema: { email: z.string(), customer_id: z.string(), campaign_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, campaign_id, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const r = await apiPost(email, `customers/${cid}/campaigns:mutate`, { operations: [{ remove: `customers/${cid}/campaigns/${campaign_id}` }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_delete_campaign_budget", {
+    title: "Delete Campaign Budget",
+    description: "Delete a campaign budget. Must not be associated with active campaigns.",
+    inputSchema: { email: z.string(), customer_id: z.string(), budget_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, budget_id, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const r = await apiPost(email, `customers/${cid}/campaignBudgets:mutate`, { operations: [{ remove: `customers/${cid}/campaignBudgets/${budget_id}` }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
   // ── AD GROUPS ─────────────────────────────────────────────────────────────
 
   server.registerTool("ads_list_ad_groups", {
@@ -374,6 +396,17 @@ function createMcpServer(): McpServer {
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
+  server.registerTool("ads_delete_ad_group", {
+    title: "Delete Ad Group",
+    description: "Delete an ad group from a campaign.",
+    inputSchema: { email: z.string(), customer_id: z.string(), ad_group_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, ad_group_id, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const r = await apiPost(email, `customers/${cid}/adGroups:mutate`, { operations: [{ remove: `customers/${cid}/adGroups/${ad_group_id}` }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
   // ── ADS ───────────────────────────────────────────────────────────────────
 
   server.registerTool("ads_list_ads", {
@@ -397,6 +430,37 @@ function createMcpServer(): McpServer {
   }, async ({ email, customer_id, ad_group_id, ad_id, status, login_customer_id }) => {
     const cid = customer_id.replace(/-/g, "");
     const r = await apiPost(email, `customers/${cid}/adGroupAds:mutate`, { operations: [{ update: { resourceName: `customers/${cid}/adGroupAds/${ad_group_id}~${ad_id}`, status }, updateMask: "status" }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_create_ad", {
+    title: "Create Ad",
+    description: "Create a responsive search ad (RSA) or expanded text ad in an ad group.",
+    inputSchema: {
+      email: z.string(), customer_id: z.string(), ad_group_id: z.string(),
+      type: z.enum(["RSA", "EXPANDED_TEXT"]).default("RSA"),
+      headlines: z.array(z.string()).min(1).describe("Headline texts (3+ for RSA, 1+ for ETA)"),
+      descriptions: z.array(z.string()).min(1).describe("Description texts (2+ for RSA, 1+ for ETA)"),
+      final_urls: z.array(z.string()).min(1), status: z.enum(["ENABLED", "PAUSED"]).default("ENABLED"),
+      login_customer_id: z.string().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async ({ email, customer_id, ad_group_id, type, headlines, descriptions, final_urls, status, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, ""); const adSpec: Record<string, unknown> = { finalUrls: final_urls, status };
+    if (type === "RSA") adSpec.responsiveSearchAd = { headlines: headlines.map(h => ({ text: h })), descriptions: descriptions.map(d => ({ text: d })) };
+    else adSpec.expandedTextAd = { headlinePart1: headlines[0], headlinePart2: headlines[1] || "", description: descriptions[0], description2: descriptions[1] || "" };
+    const r = await apiPost(email, `customers/${cid}/adGroupAds:mutate`, { operations: [{ create: { adGroup: `customers/${cid}/adGroups/${ad_group_id}`, ad: adSpec } }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_delete_ad", {
+    title: "Delete Ad",
+    description: "Delete an ad from an ad group.",
+    inputSchema: { email: z.string(), customer_id: z.string(), ad_group_id: z.string(), ad_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, ad_group_id, ad_id, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const r = await apiPost(email, `customers/${cid}/adGroupAds:mutate`, { operations: [{ remove: `customers/${cid}/adGroupAds/${ad_group_id}~${ad_id}` }] }, lcid(email, login_customer_id));
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
@@ -455,6 +519,44 @@ function createMcpServer(): McpServer {
     if (status) { upd.status = status; mask.push("status"); }
     if (cpc_bid_micros) { upd.cpcBidMicros = cpc_bid_micros; mask.push("cpc_bid_micros"); }
     const r = await apiPost(email, `customers/${cid}/adGroupCriteria:mutate`, { operations: [{ update: upd, updateMask: mask.join(",") }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_delete_keyword", {
+    title: "Delete Keyword",
+    description: "Delete a keyword from an ad group.",
+    inputSchema: { email: z.string(), customer_id: z.string(), ad_group_id: z.string(), criterion_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, ad_group_id, criterion_id, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const r = await apiPost(email, `customers/${cid}/adGroupCriteria:mutate`, { operations: [{ remove: `customers/${cid}/adGroupCriteria/${ad_group_id}~${criterion_id}` }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  // ── PLACEMENTS (Display Network) ───────────────────────────────────────────
+
+  server.registerTool("ads_list_placements", {
+    title: "List Placements",
+    description: "List managed placements in ad groups.",
+    inputSchema: { email: z.string(), customer_id: z.string(), campaign_id: z.string().optional(), ad_group_id: z.string().optional(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, campaign_id, ad_group_id, login_customer_id }) => {
+    const filters = ["ad_group_criterion.type = 'PLACEMENT'", "ad_group_criterion.status != 'REMOVED'"];
+    if (campaign_id) filters.push(`campaign.id = ${campaign_id}`);
+    if (ad_group_id) filters.push(`ad_group.id = ${ad_group_id}`);
+    const r = await gaql(email, customer_id, `SELECT ad_group_criterion.criterion_id, ad_group_criterion.placement.url, ad_group_criterion.status, ad_group_criterion.bid_modifier, ad_group.id, ad_group.name FROM ad_group_criterion WHERE ${filters.join(" AND ")}`, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_add_placements", {
+    title: "Add Placements",
+    description: "Add managed placements to an ad group (Display Network).",
+    inputSchema: { email: z.string(), customer_id: z.string(), ad_group_id: z.string(), placements: z.array(z.object({ url: z.string(), bid_modifier: z.number().optional() })), status: z.enum(["ENABLED", "PAUSED"]).default("ENABLED"), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async ({ email, customer_id, ad_group_id, placements, status, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const ops = placements.map(p => ({ create: { adGroup: `customers/${cid}/adGroups/${ad_group_id}`, status, placement: { url: p.url }, ...(p.bid_modifier ? { bidModifier: p.bid_modifier } : {}) } }));
+    const r = await apiPost(email, `customers/${cid}/adGroupCriteria:mutate`, { operations: ops }, lcid(email, login_customer_id));
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
@@ -562,6 +664,40 @@ function createMcpServer(): McpServer {
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
+  // ── CUSTOM AUDIENCES ───────────────────────────────────────────────────────
+
+  server.registerTool("ads_create_custom_audience", {
+    title: "Create Custom Audience",
+    description: "Create a custom audience (CRMS customer list, website visitors, etc).",
+    inputSchema: { email: z.string(), customer_id: z.string(), name: z.string(), description: z.string().optional(), type: z.enum(["CUSTOMER_LIST", "WEBSITE_VISITOR", "MOBILE_APP_USER", "ENGAGEMENT"]).default("CUSTOMER_LIST"), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async ({ email, customer_id, name, description, type, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, ""); const typeMap: Record<string, string> = { CUSTOMER_LIST: "CRM_BASED", WEBSITE_VISITOR: "WEBSITE_VISITOR", MOBILE_APP_USER: "APP_USER", ENGAGEMENT: "ENGAGEMENT" };
+    const r = await apiPost(email, `customers/${cid}/customAudiences:mutate`, { operations: [{ create: { name, description: description || "", type: typeMap[type] } }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_list_custom_audiences", {
+    title: "List Custom Audiences",
+    description: "List all custom audiences in the account.",
+    inputSchema: { email: z.string(), customer_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, login_customer_id }) => {
+    const r = await gaql(email, customer_id, "SELECT custom_audience.id, custom_audience.name, custom_audience.description, custom_audience.type, custom_audience.status, custom_audience.member_count FROM custom_audience WHERE custom_audience.status != 'REMOVED'", lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  server.registerTool("ads_delete_custom_audience", {
+    title: "Delete Custom Audience",
+    description: "Delete a custom audience.",
+    inputSchema: { email: z.string(), customer_id: z.string(), custom_audience_id: z.string(), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, custom_audience_id, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, "");
+    const r = await apiPost(email, `customers/${cid}/customAudiences:mutate`, { operations: [{ remove: `customers/${cid}/customAudiences/${custom_audience_id}` }] }, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
   // ── AUDIENCE / TARGETING ──────────────────────────────────────────────────
 
   server.registerTool("ads_list_audience_targeting", {
@@ -572,6 +708,22 @@ function createMcpServer(): McpServer {
   }, async ({ email, customer_id, campaign_id, login_customer_id }) => {
     const cf = campaign_id ? `AND campaign.id = ${campaign_id}` : "";
     const r = await gaql(email, customer_id, `SELECT ad_group_criterion.criterion_id, ad_group_criterion.type, ad_group_criterion.status, ad_group_criterion.bid_modifier, ad_group.id, ad_group.name, campaign.id, campaign.name FROM ad_group_criterion WHERE ad_group_criterion.type IN ('USER_LIST','USER_INTEREST','LIFE_EVENT','DETAILED_DEMOGRAPHIC','CUSTOM_AFFINITY','CUSTOM_INTENT') AND ad_group_criterion.status != 'REMOVED' ${cf}`, lcid(email, login_customer_id));
+    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  });
+
+  // ── BULK OPERATIONS ───────────────────────────────────────────────────────
+
+  server.registerTool("ads_mass_update", {
+    title: "Mass Update",
+    description: "Update multiple resources (campaigns, ad groups, keywords) with the same field values.",
+    inputSchema: { email: z.string(), customer_id: z.string(), resource_type: z.enum(["campaign", "ad_group", "keyword"]), resource_ids: z.array(z.string()).describe("Resource IDs to update"), field: z.string().describe("Field name"), value: z.unknown().describe("New value"), login_customer_id: z.string().optional() },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async ({ email, customer_id, resource_type, resource_ids, field, value, login_customer_id }) => {
+    const cid = customer_id.replace(/-/g, ""); const l = lcid(email, login_customer_id);
+    const pathMap = { campaign: `customers/${cid}/campaigns`, ad_group: `customers/${cid}/adGroups`, keyword: `customers/${cid}/adGroupCriteria` };
+    const basePath = pathMap[resource_type]; const ops = resource_ids.map(id => { const upd: Record<string, unknown> = { resourceName: `${basePath}/${id}` }; upd[field] = value; return { update: upd, updateMask: field }; });
+    const endpoint = resource_type === "campaign" ? `customers/${cid}/campaigns:mutate` : resource_type === "ad_group" ? `customers/${cid}/adGroups:mutate` : `customers/${cid}/adGroupCriteria:mutate`;
+    const r = await apiPost(email, endpoint, { operations: ops }, l);
     return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
   });
 
