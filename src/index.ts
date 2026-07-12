@@ -14,6 +14,10 @@ const SCOPE = "https://www.googleapis.com/auth/adwords";
 const DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || "";
 const CLIENT_ID = process.env.GOOGLE_ADS_CLIENT_ID || "";
 const CLIENT_SECRET = process.env.GOOGLE_ADS_CLIENT_SECRET || "";
+const RAILWAY_API_TOKEN = process.env.RAILWAY_API_TOKEN || "";
+const RAILWAY_PROJECT_ID = process.env.RAILWAY_PROJECT_ID || "";
+const RAILWAY_SERVICE_ID = process.env.RAILWAY_SERVICE_ID || "";
+const RAILWAY_ENVIRONMENT_ID = process.env.RAILWAY_ENVIRONMENT_ID || "";
 
 function getAccounts(): Record<string, { refresh_token: string; customer_id: string; login_customer_id?: string }> {
   try {
@@ -22,6 +26,7 @@ function getAccounts(): Record<string, { refresh_token: string; customer_id: str
 }
 
 const tokenCache: Record<string, { access_token: string; expires_at: number }> = {};
+const lastTokenRefreshTime: Record<string, number> = {};
 
 // Pending OAuth results: state -> result (auto-cleaned after 10 minutes)
 const pendingOAuthResults: Record<string, { refresh_token?: string; access_token?: string; error?: string; timestamp: number }> = {};
@@ -32,16 +37,135 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+async function refreshAccessToken(email: string): Promise<void> {
+  const account = getAccounts()[email];
+  if (!account) return;
+  
+  try {
+    const params = new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      refresh_token: account.refresh_token
+    });
+    
+    const res = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString()
+    });
+    
+    if (!res.ok) {
+      const err = await res.text();
+      if (err.includes("invalid_grant")) {
+        console.error(`[${email}] Refresh token invalid/revoked. Need new OAuth authorization.`);
+        return;
+      }
+      throw new Error(err);
+    }
+    
+    const data = await res.json() as { access_token: string; refresh_token?: string; expires_in: number };
+    
+    // Update token cache
+    tokenCache[email] = {
+      access_token: data.access_token,
+      expires_at: Date.now() + data.expires_in * 1000
+    };
+    lastTokenRefreshTime[email] = Date.now();
+    
+    // If new refresh token issued, update Railway
+    if (data.refresh_token && data.refresh_token !== account.refresh_token) {
+      console.error(`[${email}] New refresh token issued, updating Railway...`);
+      await updateRailwayEnvVar(email, data.refresh_token);
+    }
+    
+    console.error(`[${email}] Token refreshed successfully (valid for ${data.expires_in}s)`);
+  } catch (e) {
+    console.error(`[${email}] Token refresh failed: ${String(e)}`);
+  }
+}
+
+async function updateRailwayEnvVar(email: string, newRefreshToken: string): Promise<void> {
+  if (!RAILWAY_API_TOKEN || !RAILWAY_SERVICE_ID || !RAILWAY_ENVIRONMENT_ID) {
+    console.error(`[${email}] Railway API token not set. Token saved in memory only.`);
+    return;
+  }
+  
+  try {
+    const accounts = getAccounts();
+    accounts[email].refresh_token = newRefreshToken;
+    
+    const mutation = `mutation($input: VariableUpsertInput!) { variableUpsert(input: $input) }`;
+    const resp = await fetch("https://backboard.railway.app/graphql/v2", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${RAILWAY_API_TOKEN}`
+      },
+      body: JSON.stringify({
+        query: mutation,
+        variables: {
+          input: {
+            name: "GOOGLE_ADS_ACCOUNTS",
+            value: JSON.stringify(accounts),
+            serviceId: RAILWAY_SERVICE_ID,
+            environmentId: RAILWAY_ENVIRONMENT_ID,
+            projectId: RAILWAY_PROJECT_ID
+          }
+        }
+      })
+    });
+    
+    const data = await resp.json();
+    if (data.errors) {
+      console.error(`[${email}] Railway update failed:`, JSON.stringify(data.errors));
+    } else {
+      console.error(`[${email}] Railway GOOGLE_ADS_ACCOUNTS updated with new refresh token`);
+    }
+  } catch (e) {
+    console.error(`[${email}] Railway API error: ${String(e)}`);
+  }
+}
+
 async function getAccessToken(email: string): Promise<string> {
   const cached = tokenCache[email];
-  if (cached && Date.now() < cached.expires_at - 60000) return cached.access_token;
+  const lastRefresh = lastTokenRefreshTime[email] || 0;
+  const now = Date.now();
+  
+  // If cached token still valid AND we've refreshed recently (< 6 hours), use it
+  if (cached && now < cached.expires_at - 60000) {
+    return cached.access_token;
+  }
+  
+  // If last refresh > 6 hours ago, proactively refresh
+  if (now - lastRefresh > 6 * 60 * 60 * 1000) {
+    await refreshAccessToken(email);
+    const freshCached = tokenCache[email];
+    if (freshCached && now < freshCached.expires_at - 60000) {
+      return freshCached.access_token;
+    }
+  }
+  
+  // If we get here, either cache is empty or refresh failed - do a normal token exchange
   const account = getAccounts()[email];
   if (!account) throw new Error(`No account for email: ${email}. Call ads_list_accounts.`);
+  
   const params = new URLSearchParams({ grant_type: "refresh_token", client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token: account.refresh_token });
   const res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params.toString() });
-  if (!res.ok) throw new Error(`Token refresh failed: ${await res.text()}`);
-  const data = await res.json() as { access_token: string; expires_in: number };
+  if (!res.ok) {
+    const err = await res.text();
+    if (err.includes("invalid_grant")) throw new Error(`Token invalid for ${email}. Refresh token revoked. Need new OAuth authorization.`);
+    throw new Error(`Token refresh failed: ${err}`);
+  }
+  const data = await res.json() as { access_token: string; refresh_token?: string; expires_in: number };
   tokenCache[email] = { access_token: data.access_token, expires_at: Date.now() + data.expires_in * 1000 };
+  lastTokenRefreshTime[email] = Date.now();
+  
+  // If new refresh token, update Railway
+  if (data.refresh_token && data.refresh_token !== account.refresh_token) {
+    await updateRailwayEnvVar(email, data.refresh_token);
+  }
+  
   return data.access_token;
 }
 
