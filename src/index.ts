@@ -513,9 +513,10 @@ function createMcpServer(): McpServer {
     const operations = ads.map(a => ({
       create: {
         adGroup: `customers/${cid}/adGroups/${a.ad_group_id}`,
+                  status: a.status,
+
         ad: {
           finalUrls: a.final_urls,
-          status: a.status,
           responsiveSearchAd: {
             headlines: a.headlines.map(h => ({ text: h })),
             descriptions: a.descriptions.map(d => ({ text: d })),
