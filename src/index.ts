@@ -193,9 +193,9 @@ http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end("Not Found");
 }).listen(process.env.PORT || 3000, () => {
-  console.log("Google Ads MCP Server started on port", process.env.PORT || 3000);
-  console.log("✅ Using Service Account authentication (permanent, never expires)");
-  console.log("❌ OAuth refresh tokens removed");
+  console.log("✅ Google Ads MCP Server started with Service Account authentication");
+  console.log("✅ Using permanent credentials - never expires");
+  console.log("✅ OAuth refresh tokens completely removed");
 });
 
 server.setRequestHandler(transport);
