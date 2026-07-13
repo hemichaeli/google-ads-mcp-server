@@ -9,7 +9,6 @@ const BASE_URL = `https://googleads.googleapis.com/${API_VERSION}`;
 const SCOPE = "https://www.googleapis.com/auth/adwords";
 const DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || "";
 
-// Service Account credentials (never expire)
 let jwtClient: JWT | null = null;
 
 async function initServiceAccountAuth(): Promise<JWT> {
@@ -78,13 +77,11 @@ async function makeGoogleAdsRequest(
   });
 }
 
-// MCP Server setup
 const server = new McpServer({
   name: "google-ads-mcp",
   version: "1.0.0",
 });
 
-// Get accessible customers
 server.tool(
   "list_accessible_customers",
   "Get all accessible Google Ads customer IDs",
@@ -100,7 +97,6 @@ server.tool(
   }
 );
 
-// List campaigns
 server.tool(
   "list_campaigns",
   "List campaigns for a customer",
@@ -124,7 +120,6 @@ server.tool(
   }
 );
 
-// Get account performance
 server.tool(
   "get_account_performance",
   "Get account performance metrics",
@@ -147,7 +142,6 @@ server.tool(
   }
 );
 
-// Health check
 server.tool(
   "health_check",
   "Check if Service Account authentication is working",
@@ -176,7 +170,6 @@ server.tool(
   }
 );
 
-// Server startup
 const httpServer = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200);
@@ -191,7 +184,6 @@ const httpServer = http.createServer((req, res) => {
 const transport = new SSEServerTransport("/messages", httpServer);
 
 httpServer.listen(process.env.PORT || 3000, () => {
-  console.log("✅ Google Ads MCP Server started with Service Account authentication");
-  console.log("✅ Using permanent credentials - never expires");
-  console.log("✅ OAuth refresh tokens completely removed");
+  console.log("✅ Google Ads MCP Server online with Service Account");
+  console.log("✅ Permanent credentials - no expiration");
 });
