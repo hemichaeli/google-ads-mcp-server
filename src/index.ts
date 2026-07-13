@@ -177,25 +177,21 @@ server.tool(
 );
 
 // Server startup
-const transport = new SSEServerTransport("/messages", http.createServer());
-
-http.createServer(async (req, res) => {
+const httpServer = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200);
     res.end("OK");
     return;
   }
   
-  if (req.url?.startsWith("/messages")) {
-    return transport.handleRequest(req, res);
-  }
-  
   res.writeHead(404);
   res.end("Not Found");
-}).listen(process.env.PORT || 3000, () => {
+});
+
+const transport = new SSEServerTransport("/messages", httpServer);
+
+httpServer.listen(process.env.PORT || 3000, () => {
   console.log("✅ Google Ads MCP Server started with Service Account authentication");
   console.log("✅ Using permanent credentials - never expires");
   console.log("✅ OAuth refresh tokens completely removed");
 });
-
-server.setRequestHandler(transport);
