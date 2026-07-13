@@ -1,6 +1,7 @@
-# Force rebuild without cache
+# Remove dist folder completely - force clean rebuild
 FROM node:20-alpine
 WORKDIR /app
+RUN rm -rf dist/
 COPY package*.json ./
 RUN npm install --no-cache
 COPY . .
