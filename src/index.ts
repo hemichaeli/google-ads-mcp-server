@@ -10,7 +10,7 @@ import { randomUUID } from "crypto";
 // esbuild-bundled to dist/index.js. Node 20, ESM.
 // ---------------------------------------------------------------------------
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 const API_VERSION = "v21";
 const BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -339,6 +339,68 @@ function registerTools(s: McpServer) {
   s.tool("ads_mutate", "Universal mutate: POST /{resource}:mutate with operations (advanced escape hatch).", { ...acctArgs, resource: z.string().describe("e.g. adGroupAds, campaigns, adGroupCriteria"), operations: z.array(z.any()) }, async ({ email, customer_id, resource, operations }) => {
     try { return ok(await cust(email, customer_id, `/${resource}:mutate`, "POST", { operations })); } catch (e) { return fail(e); }
   });
+
+  // -- Manager (MCC) linking -------------------------------------------------
+  // From the MANAGER account, send a link request to a client account.
+  // Creates a PENDING CustomerClientLink. login-customer-id must be the manager.
+  s.tool(
+    "ads_link_account",
+    "MCC: send a manager link request to a client account (creates a PENDING CustomerClientLink). The client must then accept (ads_accept_manager_link or the Google Ads UI). manager_customer_id = the MCC id; client_customer_id = the account to bring under management.",
+    {
+      email: z.string().optional().describe("Auth account email for the MANAGER (must be a user on the MCC)."),
+      manager_customer_id: z.string().describe("The manager (MCC) customer id."),
+      client_customer_id: z.string().describe("The client account customer id to link."),
+    },
+    async ({ email, manager_customer_id, client_customer_id }) => {
+      try {
+        const mgr = cidOf(manager_customer_id);
+        const acct = resolveAccount(email) || resolveAccount(manager_customer_id);
+        if (!acct) throw new Error(`No auth account for manager ${email || manager_customer_id}.`);
+        // customerClientLinks:mutate uses a SINGULAR operation.
+        const body = { operation: { create: { clientCustomer: `customers/${cidOf(client_customer_id)}`, status: "PENDING" } } };
+        const j = await adsFetch(acct, "POST", `${BASE}/customers/${mgr}/customerClientLinks:mutate`, body, mgr);
+        return ok({ sent: true, manager: mgr, client: cidOf(client_customer_id), result: j, next: "Accept the request from the client account (ads_accept_manager_link, or Google Ads UI > Admin > Access and security > Managers)." });
+      } catch (e) { return fail(e); }
+    }
+  );
+
+  // List link requests a MANAGER has sent (to find the manager_link_id for accepting).
+  s.tool(
+    "ads_list_manager_links",
+    "List CustomerClientLinks a MANAGER account has (status + resourceName, so you can see pending/active links). Run against the MCC customer id.",
+    { ...acctArgs },
+    async ({ email, customer_id }) => {
+      try {
+        const cid = cidOf(customer_id);
+        return ok(await adsFetch(resolveAccount(email) || resolveAccount(customer_id)!, "POST", `${BASE}/customers/${cid}/googleAds:search`, { query: "SELECT customer_client_link.client_customer, customer_client_link.status, customer_client_link.manager_link_id, customer_client_link.resource_name FROM customer_client_link" }, cid));
+      } catch (e) { return fail(e); }
+    }
+  );
+
+  // From the CLIENT account, accept (activate) a pending manager link.
+  // Requires the client account to be authorized in GOOGLE_ADS_ACCOUNTS with its OWN token.
+  s.tool(
+    "ads_accept_manager_link",
+    "CLIENT: accept/activate a pending manager link (sets the CustomerManagerLink status to ACTIVE). Requires the CLIENT account authorized in GOOGLE_ADS_ACCOUNTS with its own refresh_token. manager_link_id comes from ads_list_manager_links (run on the manager).",
+    {
+      email: z.string().optional().describe("Auth account email for the CLIENT account."),
+      client_customer_id: z.string().describe("The client account customer id (the one being managed)."),
+      manager_customer_id: z.string().describe("The manager (MCC) customer id."),
+      manager_link_id: z.string().describe("The manager_link_id of the pending link."),
+    },
+    async ({ email, client_customer_id, manager_customer_id, manager_link_id }) => {
+      try {
+        const cc = cidOf(client_customer_id);
+        const acct = resolveAccount(email) || resolveAccount(client_customer_id);
+        if (!acct) throw new Error(`No auth account for client ${email || client_customer_id}.`);
+        const rn = `customers/${cc}/customerManagerLinks/${cidOf(manager_customer_id)}~${cidOf(manager_link_id)}`;
+        // customerManagerLinks:mutate uses operations (plural). login-customer-id = the client itself.
+        const body = { operations: [{ update: { resourceName: rn, status: "ACTIVE" }, updateMask: "status" }] };
+        const j = await adsFetch(acct, "POST", `${BASE}/customers/${cc}/customerManagerLinks:mutate`, body, cc);
+        return ok({ accepted: true, client: cc, result: j });
+      } catch (e) { return fail(e); }
+    }
+  );
 
   // -- OAuth re-auth helpers -------------------------------------------------
   s.tool("ads_get_oauth_url", "Get a Google OAuth consent URL to (re)authorize an account. Approve, then call ads_poll_oauth_result with the same state.", { state: z.string().describe("A unique state string you choose.") }, async ({ state }) => {
