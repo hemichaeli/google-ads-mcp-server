@@ -4,13 +4,14 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import http from "http";
 import { randomUUID } from "crypto";
+import { handleOAuthRoute, checkBearer, sendUnauthorized, authEnabled } from "./mcp-auth.js";
 
 // ---------------------------------------------------------------------------
 // Google Ads MCP Server - OAuth (refresh-token) architecture, all tools.
 // esbuild-bundled to dist/index.js. Node 20, ESM.
 // ---------------------------------------------------------------------------
 
-const VERSION = "2.2.0";
+const VERSION = "2.3.0";
 const API_VERSION = "v21";
 const BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -469,90 +470,16 @@ const httpServer = http.createServer(async (req, res) => {
   try {
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: VERSION, accounts: loadAccounts().length }));
+      res.end(JSON.stringify({ status: "ok", server: "google-ads-mcp-server", version: VERSION, accounts: loadAccounts().length, auth: authEnabled }));
       return;
     }
 
-    // ── OAuth 2.1 auto-approve surface (connector DCR fix) ──────────────────
+    // ── OAuth 2.1 discovery + DCR + authorize/token (shared-secret gate) ────
     // Claude probes these on "Connect". Without them DCR fails with
     // "Couldn't register with sign-in service" (ofid_ error).
-    if (req.method === "GET" && (
-      url.pathname === "/.well-known/oauth-protected-resource" ||
-      url.pathname === "/.well-known/oauth-protected-resource/sse" ||
-      url.pathname === "/.well-known/oauth-protected-resource/mcp"
-    )) {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        resource: PUBLIC_URL,
-        authorization_servers: [PUBLIC_URL],
-        bearer_methods_supported: ["header"],
-        scopes_supported: ["mcp"],
-      }));
-      return;
-    }
+    if (await handleOAuthRoute(req, res, url, { baseUrl: PUBLIC_URL, clientPrefix: "google-ads-mcp" })) return;
 
-    if (req.method === "GET" && (
-      url.pathname === "/.well-known/oauth-authorization-server" ||
-      url.pathname === "/.well-known/openid-configuration"
-    )) {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        issuer: PUBLIC_URL,
-        authorization_endpoint: `${PUBLIC_URL}/authorize`,
-        token_endpoint: `${PUBLIC_URL}/token`,
-        registration_endpoint: `${PUBLIC_URL}/register`,
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code", "refresh_token"],
-        code_challenge_methods_supported: ["S256", "plain"],
-        token_endpoint_auth_methods_supported: ["none"],
-        scopes_supported: ["mcp"],
-      }));
-      return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/register") {
-      const meta = (await readBody(req)) ?? {};
-      res.writeHead(201, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        client_id: "google-ads-mcp-client",
-        client_id_issued_at: Math.floor(Date.now() / 1000),
-        token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code", "refresh_token"],
-        response_types: ["code"],
-        redirect_uris: Array.isArray((meta as any).redirect_uris) ? (meta as any).redirect_uris : [],
-      }));
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/authorize") {
-      const redirectUri = url.searchParams.get("redirect_uri");
-      const state = url.searchParams.get("state") || "";
-      if (!redirectUri) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "invalid_request", error_description: "redirect_uri required" }));
-        return;
-      }
-      const loc = new URL(redirectUri);
-      loc.searchParams.set("code", "google-ads-mcp-auth-code");
-      if (state) loc.searchParams.set("state", state);
-      res.writeHead(302, { Location: loc.toString(), "Cache-Control": "no-store" });
-      res.end();
-      return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/token") {
-      await readBody(req);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        access_token: "google-ads-mcp-token",
-        token_type: "Bearer",
-        expires_in: 315360000,
-        refresh_token: "google-ads-mcp-refresh",
-        scope: "mcp",
-      }));
-      return;
-    }
-
+    // Google OAuth account re-auth callback - stays OPEN (Google calls it, no bearer token).
     if (url.pathname === "/oauth/callback" && req.method === "GET") {
       const code = url.searchParams.get("code");
       const state = url.searchParams.get("state") || "";
@@ -566,6 +493,11 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(`<html><body style="font-family:sans-serif;text-align:center;padding-top:80px"><h1>${j.refresh_token ? "✅ Authorization Successful!" : "⚠️ No refresh token returned"}</h1><p>You can close this tab and return to Claude.</p><p style="color:#888">State: ${state}</p></body></html>`);
       } catch (e: any) { res.writeHead(500); res.end("OAuth exchange failed: " + e?.message); }
       return;
+    }
+
+    // ── Shared-secret gate: every route below can reach an MCP tool ────────
+    if (url.pathname === "/mcp" || url.pathname === "/sse" || url.pathname === "/messages") {
+      if (!checkBearer(req)) { sendUnauthorized(res, PUBLIC_URL); return; }
     }
 
     // Streamable HTTP
