@@ -5,13 +5,16 @@ import { z } from "zod";
 import http from "http";
 import { randomUUID } from "crypto";
 import { handleOAuthRoute, checkBearer, sendUnauthorized, authEnabled } from "./mcp-auth.js";
+import { installProcessGuards, guardSseSocket } from "./process-guards.js";
+
+installProcessGuards("google-ads-mcp");
 
 // ---------------------------------------------------------------------------
 // Google Ads MCP Server - OAuth (refresh-token) architecture, all tools.
 // esbuild-bundled to dist/index.js. Node 20, ESM.
 // ---------------------------------------------------------------------------
 
-const VERSION = "2.3.0";
+const VERSION = "2.3.1";
 const API_VERSION = "v21";
 const BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -534,6 +537,7 @@ const httpServer = http.createServer(async (req, res) => {
 
     // Legacy SSE
     if (url.pathname === "/sse" && req.method === "GET") {
+      guardSseSocket(req, res, "google-ads-mcp-sse");
       const transport = new SSEServerTransport("/messages", res);
       sse[transport.sessionId] = transport;
       res.on("close", () => { delete sse[transport.sessionId]; });
